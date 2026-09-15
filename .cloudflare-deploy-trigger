@@ -1,4 +1,5 @@
-production-redeploy=2026-09-16T05:53:00+07:00
-reason=force-workers-build-after-git-integration-diagnosis
+production-redeploy=2026-09-16T06:00:00+07:00
+reason=trigger-first-cloudflare-build-after-git-reconnect
 expected-entrypoint=src/worker.js
 expected-production-branch=main
+connection-status=git-reconnected
