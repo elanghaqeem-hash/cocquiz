@@ -13,7 +13,7 @@ The production entrypoint is `src/worker.js`. It wraps the original quiz impleme
 
 ## Local development
 
-Requirements: Node.js 20 or newer.
+Requirements: Node.js 22 or newer. CI currently validates with Node.js 24.
 
 ```bash
 npm install
