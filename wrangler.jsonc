@@ -1,7 +1,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "cocquiz",
-  "main": "src/runtime-worker.js",
+  "main": "src/mobile-worker.js",
   "compatibility_date": "2026-09-15",
   "workers_dev": true,
   "durable_objects": {
