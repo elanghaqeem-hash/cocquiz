@@ -3,6 +3,9 @@ import legacyWorker, { QuizRoom as LegacyQuizRoom } from './index.js';
 const ROOM_CODE_RE = /^[A-Z0-9]{6}$/;
 const MAX_PARTICIPANTS = 100;
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const HOST_SESSION_COOKIE = 'cocquiz_host_session';
+const HOST_SESSION_TTL_SECONDS = 8 * 60 * 60;
+const textEncoder = new TextEncoder();
 
 const json = (data, status = 200, extraHeaders = {}) =>
   new Response(JSON.stringify(data), {
@@ -33,6 +36,137 @@ async function readJson(request) {
   } catch {
     return null;
   }
+}
+
+function parseCookies(request) {
+  const raw = request.headers.get('cookie') || '';
+  const cookies = {};
+  for (const part of raw.split(';')) {
+    const index = part.indexOf('=');
+    if (index < 0) continue;
+    const key = part.slice(0, index).trim();
+    const value = part.slice(index + 1).trim();
+    if (key) cookies[key] = value;
+  }
+  return cookies;
+}
+
+function base64UrlEncode(bytes) {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function base64UrlDecode(value) {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized + '='.repeat((4 - (normalized.length % 4 || 4)) % 4);
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+async function hmac(secret, value) {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    textEncoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign('HMAC', key, textEncoder.encode(value));
+  return base64UrlEncode(new Uint8Array(signature));
+}
+
+async function secureEqual(a, b) {
+  const aDigest = new Uint8Array(await crypto.subtle.digest('SHA-256', textEncoder.encode(String(a))));
+  const bDigest = new Uint8Array(await crypto.subtle.digest('SHA-256', textEncoder.encode(String(b))));
+  let diff = 0;
+  for (let i = 0; i < aDigest.length; i += 1) diff |= aDigest[i] ^ bDigest[i];
+  return diff === 0;
+}
+
+function hostUsername(env) {
+  return String(env.HOST_USERNAME || 'admin');
+}
+
+function hostAuthConfigured(env) {
+  return typeof env.HOST_PASSWORD === 'string' && env.HOST_PASSWORD.length >= 12;
+}
+
+async function createHostSession(env) {
+  const payload = JSON.stringify({
+    u: hostUsername(env),
+    exp: Math.floor(Date.now() / 1000) + HOST_SESSION_TTL_SECONDS,
+  });
+  const encoded = base64UrlEncode(textEncoder.encode(payload));
+  const signature = await hmac(env.HOST_PASSWORD, encoded);
+  return `${encoded}.${signature}`;
+}
+
+async function getHostSession(request, env) {
+  if (!hostAuthConfigured(env)) return null;
+  const token = parseCookies(request)[HOST_SESSION_COOKIE];
+  if (!token) return null;
+  const separator = token.lastIndexOf('.');
+  if (separator <= 0) return null;
+
+  const encoded = token.slice(0, separator);
+  const providedSignature = token.slice(separator + 1);
+  const expectedSignature = await hmac(env.HOST_PASSWORD, encoded);
+  if (!(await secureEqual(providedSignature, expectedSignature))) return null;
+
+  try {
+    const payload = JSON.parse(new TextDecoder().decode(base64UrlDecode(encoded)));
+    if (payload.u !== hostUsername(env)) return null;
+    if (!Number.isFinite(payload.exp) || payload.exp <= Math.floor(Date.now() / 1000)) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function hostSessionCookie(value, maxAge = HOST_SESSION_TTL_SECONDS) {
+  return `${HOST_SESSION_COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`;
+}
+
+function isSameOrigin(request) {
+  const origin = request.headers.get('origin');
+  if (!origin) return true;
+  return origin === new URL(request.url).origin;
+}
+
+async function hostLogin(request, env) {
+  if (!hostAuthConfigured(env)) {
+    return json(
+      { error: 'Login host belum dikonfigurasi. Tambahkan secret HOST_PASSWORD di Cloudflare (minimal 12 karakter).' },
+      503
+    );
+  }
+  if (!isSameOrigin(request)) return json({ error: 'Origin tidak diizinkan' }, 403);
+
+  const body = await readJson(request);
+  if (!body) return json({ error: 'Payload JSON tidak valid' }, 400);
+
+  const username = String(body.username || '').trim();
+  const password = String(body.password || '');
+  const usernameOk = await secureEqual(username, hostUsername(env));
+  const passwordOk = await secureEqual(password, env.HOST_PASSWORD);
+  if (!usernameOk || !passwordOk) return json({ error: 'Username atau password tidak valid' }, 401);
+
+  const session = await createHostSession(env);
+  return json(
+    { ok: true, username: hostUsername(env) },
+    200,
+    { 'set-cookie': hostSessionCookie(session) }
+  );
+}
+
+async function hostLogout(request) {
+  if (!isSameOrigin(request)) return json({ error: 'Origin tidak diizinkan' }, 403);
+  return json(
+    { ok: true },
+    200,
+    { 'set-cookie': hostSessionCookie('', 0) }
+  );
 }
 
 function addSecurityHeaders(response) {
@@ -73,10 +207,19 @@ function patchClientHtml(html) {
   const oldJoinValidation = "if(!room||!name){toast('Isi kode dan nama');return}";
   const newJoinValidation = "if(!/^[A-Z0-9]{6}$/.test(room)||!name){toast('Kode quiz harus 6 karakter dan nama wajib diisi');return}";
 
+  const loginPanel = `<section id="hostLoginPanel" class="panel card hidden"><div class="pill" style="display:inline-block">🔐 Host Access</div><h2>Login Host</h2><p class="lead" style="font-size:15px">Masuk terlebih dahulu untuk membuat dan mengendalikan sesi quiz.</p><div class="field"><label>Username</label><input id="hostUsername" autocomplete="username" value="admin" placeholder="Username host"></div><div class="field"><label>Password</label><input id="hostPassword" type="password" autocomplete="current-password" placeholder="Password host" onkeydown="if(event.key==='Enter')hostLogin()"></div><div class="actions"><button class="btn pink" onclick="hostLogin()">Masuk sebagai Host</button><button class="btn secondary" onclick="goHome()">Kembali</button></div><div id="hostLoginHelp" class="small" style="margin-top:14px">Akses host dilindungi autentikasi.</div></section>`;
+
+  const authScript = `async function openHostLogin(){try{var r=await fetch('/api/host/session',{credentials:'same-origin'});var s=await r.json();hideAll();if(s.authenticated){el('hostPanel').classList.remove('hidden')}else{el('hostLoginPanel').classList.remove('hidden');setTimeout(function(){el('hostUsername').focus()},0)}}catch(e){hideAll();el('hostLoginPanel').classList.remove('hidden')}}\nasync function hostLogin(){var username=el('hostUsername').value.trim(),password=el('hostPassword').value;if(!username||!password){toast('Isi username dan password host');return}try{var r=await fetch('/api/host/login',{method:'POST',headers:{'content-type':'application/json'},credentials:'same-origin',body:JSON.stringify({username:username,password:password})});var data=await r.json();if(!r.ok)throw new Error(data.error||'Login gagal');el('hostPassword').value='';hideAll();el('hostPanel').classList.remove('hidden');toast('Login host berhasil')}catch(e){toast(e.message)}}\nasync function logoutHost(){try{await fetch('/api/host/logout',{method:'POST',credentials:'same-origin'});}catch(e){}room='';hostToken='';isHost=false;goHome();toast('Sesi host telah keluar')}\n`;
+
   return html
     .replace(oldRefresh, newRefresh)
     .replace(oldAction, newAction)
     .replace(oldJoinValidation, newJoinValidation)
+    .replace('onclick="showHost()">Buat Sesi sebagai Host</button>', 'onclick="openHostLogin()">Buat Sesi sebagai Host</button>')
+    .replace('<section id="hostPanel"', `${loginPanel}<section id="hostPanel"`)
+    .replace('<h2>Buat Sesi Quiz</h2>', '<div style="display:flex;justify-content:space-between;gap:12px;align-items:center"><h2 style="margin:0">Buat Sesi Quiz</h2><button class="btn secondary" style="padding:9px 12px" onclick="logoutHost()">Keluar Host</button></div>')
+    .replace("['home','joinPanel','hostPanel'", "['home','joinPanel','hostLoginPanel','hostPanel'")
+    .replace("var room='',pid='',hostToken='',isHost=false,poll=null,current=null;", "var room='',pid='',hostToken='',isHost=false,poll=null,current=null;\n" + authScript)
     .replace('<div id="toast" class="toast hidden"></div>', '<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>');
 }
 
@@ -203,9 +346,34 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
+    if (url.pathname === '/api/host/login') {
+      if (request.method !== 'POST') {
+        return json({ error: 'Method not allowed' }, 405, { allow: 'POST' });
+      }
+      return addSecurityHeaders(await hostLogin(request, env));
+    }
+
+    if (url.pathname === '/api/host/logout') {
+      if (request.method !== 'POST') {
+        return json({ error: 'Method not allowed' }, 405, { allow: 'POST' });
+      }
+      return addSecurityHeaders(await hostLogout(request));
+    }
+
+    if (url.pathname === '/api/host/session') {
+      if (request.method !== 'GET') {
+        return json({ error: 'Method not allowed' }, 405, { allow: 'GET' });
+      }
+      const session = await getHostSession(request, env);
+      return addSecurityHeaders(json({ authenticated: Boolean(session), username: session?.u || null }));
+    }
+
     if (url.pathname === '/api/create') {
       if (request.method !== 'POST') {
         return json({ error: 'Method not allowed' }, 405, { allow: 'POST' });
+      }
+      if (!(await getHostSession(request, env))) {
+        return addSecurityHeaders(json({ error: 'Silakan login sebagai host terlebih dahulu' }, 401));
       }
       return addSecurityHeaders(await createRoom(request, env));
     }
@@ -220,6 +388,11 @@ export default {
       const expectedMethod = operation === 'state' ? 'GET' : 'POST';
       if (request.method !== expectedMethod) {
         return json({ error: 'Method not allowed' }, 405, { allow: expectedMethod });
+      }
+
+      const hostOperation = operation === 'action' || (operation === 'state' && Boolean(bearerToken(request)));
+      if (hostOperation && !(await getHostSession(request, env))) {
+        return addSecurityHeaders(json({ error: 'Sesi host berakhir. Silakan login kembali.' }, 401));
       }
 
       return addSecurityHeaders(await legacyWorker.fetch(request, env, ctx));
