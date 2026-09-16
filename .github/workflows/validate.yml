@@ -29,6 +29,8 @@ jobs:
           node --check src/index.js
           node --check src/worker.js
           node --check src/coc-worker.js
+          node --check src/runtime-worker.js
+          node --check src/mobile-worker.js
 
       - name: Wrangler dry run
         run: npm run check
