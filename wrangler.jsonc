@@ -1,14 +1,9 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "cocquiz",
-  "main": "src/coc-worker.js",
+  "main": "src/runtime-worker.js",
   "compatibility_date": "2026-09-15",
   "workers_dev": true,
-  "secrets": {
-    "required": [
-      "HOST_PASSWORD"
-    ]
-  },
   "durable_objects": {
     "bindings": [
       {
