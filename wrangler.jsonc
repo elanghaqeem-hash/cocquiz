@@ -4,6 +4,11 @@
   "main": "src/coc-worker.js",
   "compatibility_date": "2026-09-15",
   "workers_dev": true,
+  "secrets": {
+    "required": [
+      "HOST_PASSWORD"
+    ]
+  },
   "durable_objects": {
     "bindings": [
       {
