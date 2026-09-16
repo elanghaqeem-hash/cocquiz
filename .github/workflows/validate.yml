@@ -28,6 +28,7 @@ jobs:
         run: |
           node --check src/index.js
           node --check src/worker.js
+          node --check src/coc-worker.js
 
       - name: Wrangler dry run
         run: npm run check
