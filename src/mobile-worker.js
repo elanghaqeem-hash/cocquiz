@@ -1,6 +1,6 @@
-import runtimeWorker, { QuizRoom } from './runtime-worker.js';
+import runtimeWorker, { QuizRoom, HostSession } from './runtime-worker.js';
 
-export { QuizRoom };
+export { QuizRoom, HostSession };
 
 const MOBILE_CSS = `
 /* Mobile-first enhancements for COCQUIZ */
@@ -97,7 +97,7 @@ export default {
     const url = new URL(request.url);
     const contentType = response.headers.get('content-type') || '';
 
-    if (url.pathname === '/' && contentType.includes('text/html')) {
+    if ((url.pathname === '/' || url.pathname === '/login') && contentType.includes('text/html')) {
       const headers = new Headers(response.headers);
       headers.set('cache-control', 'no-store');
       const html = makeMobileHtml(await response.text());

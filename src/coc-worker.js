@@ -1,4 +1,6 @@
-import hardenedWorker, { QuizRoom as HardenedQuizRoom } from './worker.js';
+import hardenedWorker, { QuizRoom as HardenedQuizRoom, HostSession } from './worker.js';
+
+export { HostSession };
 
 const COC_QUESTIONS = [
   {
@@ -241,7 +243,7 @@ export default {
 
     const response = await hardenedWorker.fetch(request, env, ctx);
     const contentType = response.headers.get('content-type') || '';
-    if (url.pathname === '/' && contentType.includes('text/html')) {
+    if ((url.pathname === '/' || url.pathname === '/login') && contentType.includes('text/html')) {
       const headers = new Headers(response.headers);
       headers.set('cache-control', 'no-store');
       return new Response(patchCocHtml(await response.text()), {

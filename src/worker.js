@@ -3,6 +3,8 @@ import legacyWorker, { QuizRoom as LegacyQuizRoom } from './index.js';
 const ROOM_CODE_RE = /^[A-Z0-9]{6}$/;
 const MAX_PARTICIPANTS = 100;
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const HOST_USERNAME = 'admin';
+const HOST_PASSWORD_SHA256 = '240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9';
 const HOST_SESSION_COOKIE = 'cocquiz_host_session';
 const HOST_SESSION_TTL_SECONDS = 8 * 60 * 60;
 const textEncoder = new TextEncoder();
@@ -51,29 +53,11 @@ function parseCookies(request) {
   return cookies;
 }
 
-function base64UrlEncode(bytes) {
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-}
-
-function base64UrlDecode(value) {
-  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
-  const padded = normalized + '='.repeat((4 - (normalized.length % 4 || 4)) % 4);
-  const binary = atob(padded);
-  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
-}
-
-async function hmac(secret, value) {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    textEncoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
+async function sha256Hex(value) {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest('SHA-256', textEncoder.encode(String(value)))
   );
-  const signature = await crypto.subtle.sign('HMAC', key, textEncoder.encode(value));
-  return base64UrlEncode(new Uint8Array(signature));
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 async function secureEqual(a, b) {
@@ -84,44 +68,80 @@ async function secureEqual(a, b) {
   return diff === 0;
 }
 
-function hostUsername(env) {
-  return String(env.HOST_USERNAME || 'admin');
+function hostUsername() {
+  return HOST_USERNAME;
 }
 
-function hostAuthConfigured(env) {
-  return typeof env.HOST_PASSWORD === 'string' && env.HOST_PASSWORD.length >= 12;
+function hostSessionStub(env, token) {
+  const id = env.HOST_SESSION.idFromName(token);
+  return env.HOST_SESSION.get(id);
+}
+
+export class HostSession {
+  constructor(ctx, env) {
+    this.ctx = ctx;
+    this.env = env;
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+
+    if (url.pathname === '/create' && request.method === 'POST') {
+      const body = await readJson(request);
+      if (!body || body.username !== HOST_USERNAME || !Number.isFinite(body.exp)) {
+        return json({ error: 'Invalid session payload' }, 400);
+      }
+      await this.ctx.storage.put('session', { username: body.username, exp: body.exp });
+      await this.ctx.storage.setAlarm(body.exp * 1000);
+      return json({ ok: true }, 201);
+    }
+
+    if (url.pathname === '/validate' && request.method === 'GET') {
+      const session = await this.ctx.storage.get('session');
+      if (!session) return json({ authenticated: false }, 401);
+      if (session.exp <= Math.floor(Date.now() / 1000)) {
+        await this.ctx.storage.delete('session');
+        return json({ authenticated: false }, 401);
+      }
+      return json({ authenticated: true, username: session.username, exp: session.exp });
+    }
+
+    if (url.pathname === '/delete' && request.method === 'POST') {
+      await this.ctx.storage.delete('session');
+      return json({ ok: true });
+    }
+
+    return json({ error: 'Not found' }, 404);
+  }
+
+  async alarm() {
+    await this.ctx.storage.deleteAll();
+  }
 }
 
 async function createHostSession(env) {
-  const payload = JSON.stringify({
-    u: hostUsername(env),
-    exp: Math.floor(Date.now() / 1000) + HOST_SESSION_TTL_SECONDS,
-  });
-  const encoded = base64UrlEncode(textEncoder.encode(payload));
-  const signature = await hmac(env.HOST_PASSWORD, encoded);
-  return `${encoded}.${signature}`;
+  const token = crypto.randomUUID();
+  const exp = Math.floor(Date.now() / 1000) + HOST_SESSION_TTL_SECONDS;
+  const response = await hostSessionStub(env, token).fetch(
+    new Request('https://session/create', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: HOST_USERNAME, exp }),
+    })
+  );
+  if (!response.ok) throw new Error('Gagal membuat sesi host');
+  return token;
 }
 
 async function getHostSession(request, env) {
-  if (!hostAuthConfigured(env)) return null;
   const token = parseCookies(request)[HOST_SESSION_COOKIE];
   if (!token) return null;
-  const separator = token.lastIndexOf('.');
-  if (separator <= 0) return null;
-
-  const encoded = token.slice(0, separator);
-  const providedSignature = token.slice(separator + 1);
-  const expectedSignature = await hmac(env.HOST_PASSWORD, encoded);
-  if (!(await secureEqual(providedSignature, expectedSignature))) return null;
-
-  try {
-    const payload = JSON.parse(new TextDecoder().decode(base64UrlDecode(encoded)));
-    if (payload.u !== hostUsername(env)) return null;
-    if (!Number.isFinite(payload.exp) || payload.exp <= Math.floor(Date.now() / 1000)) return null;
-    return payload;
-  } catch {
-    return null;
-  }
+  const response = await hostSessionStub(env, token).fetch(
+    new Request('https://session/validate', { method: 'GET' })
+  );
+  if (!response.ok) return null;
+  const payload = await response.json().catch(() => null);
+  return payload?.authenticated ? { u: payload.username, exp: payload.exp } : null;
 }
 
 function hostSessionCookie(value, maxAge = HOST_SESSION_TTL_SECONDS) {
@@ -135,12 +155,6 @@ function isSameOrigin(request) {
 }
 
 async function hostLogin(request, env) {
-  if (!hostAuthConfigured(env)) {
-    return json(
-      { error: 'Login host belum dikonfigurasi. Tambahkan secret HOST_PASSWORD di Cloudflare (minimal 12 karakter).' },
-      503
-    );
-  }
   if (!isSameOrigin(request)) return json({ error: 'Origin tidak diizinkan' }, 403);
 
   const body = await readJson(request);
@@ -148,20 +162,26 @@ async function hostLogin(request, env) {
 
   const username = String(body.username || '').trim();
   const password = String(body.password || '');
-  const usernameOk = await secureEqual(username, hostUsername(env));
-  const passwordOk = await secureEqual(password, env.HOST_PASSWORD);
+  const usernameOk = await secureEqual(username, hostUsername());
+  const passwordOk = await secureEqual(await sha256Hex(password), HOST_PASSWORD_SHA256);
   if (!usernameOk || !passwordOk) return json({ error: 'Username atau password tidak valid' }, 401);
 
   const session = await createHostSession(env);
   return json(
-    { ok: true, username: hostUsername(env) },
+    { ok: true, username: hostUsername() },
     200,
     { 'set-cookie': hostSessionCookie(session) }
   );
 }
 
-async function hostLogout(request) {
+async function hostLogout(request, env) {
   if (!isSameOrigin(request)) return json({ error: 'Origin tidak diizinkan' }, 403);
+  const token = parseCookies(request)[HOST_SESSION_COOKIE];
+  if (token) {
+    await hostSessionStub(env, token)
+      .fetch(new Request('https://session/delete', { method: 'POST' }))
+      .catch(() => null);
+  }
   return json(
     { ok: true },
     200,
@@ -357,7 +377,7 @@ export default {
       if (request.method !== 'POST') {
         return json({ error: 'Method not allowed' }, 405, { allow: 'POST' });
       }
-      return addSecurityHeaders(await hostLogout(request));
+      return addSecurityHeaders(await hostLogout(request, env));
     }
 
     if (url.pathname === '/api/host/session') {
@@ -402,7 +422,7 @@ export default {
       return addSecurityHeaders(await legacyWorker.fetch(request, env, ctx));
     }
 
-    if (url.pathname !== '/') {
+    if (url.pathname !== '/' && url.pathname !== '/login') {
       return new Response('Not found', {
         status: 404,
         headers: {
@@ -414,7 +434,13 @@ export default {
     }
 
     const response = await legacyWorker.fetch(request, env, ctx);
-    const html = patchClientHtml(await response.text());
+    let html = patchClientHtml(await response.text());
+    if (url.pathname === '/login') {
+      html = html.replace(
+        '</body>',
+        '<script>window.addEventListener("DOMContentLoaded",function(){openHostLogin()})</script></body>'
+      );
+    }
     return addHtmlSecurityHeaders(
       new Response(html, {
         status: response.status,

@@ -1,6 +1,6 @@
-import cocWorker, { QuizRoom } from './coc-worker.js';
+import cocWorker, { QuizRoom, HostSession } from './coc-worker.js';
 
-export { QuizRoom };
+export { QuizRoom, HostSession };
 
 const MIN_INTERNAL_SECRET_LENGTH = 12;
 
