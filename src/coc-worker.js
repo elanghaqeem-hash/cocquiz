@@ -1,4 +1,6 @@
-import hardenedWorker, { QuizRoom as HardenedQuizRoom } from './worker.js';
+import hardenedWorker, { QuizRoom as HardenedQuizRoom, HostSession } from './worker.js';
+
+export { HostSession };
 
 const COC_QUESTIONS = [
   {
