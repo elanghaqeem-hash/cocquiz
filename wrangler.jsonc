@@ -9,11 +9,19 @@
       {
         "name": "QUIZ_ROOM",
         "class_name": "QuizRoom"
+      },
+      {
+        "name": "HOST_SESSION",
+        "class_name": "HostSession"
       }
     ]
   },
   "exports": {
     "QuizRoom": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "HostSession": {
       "type": "durable-object",
       "storage": "sqlite"
     }
