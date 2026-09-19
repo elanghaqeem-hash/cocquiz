@@ -1,6 +1,6 @@
-import runtimeWorker, { QuizRoom } from './runtime-worker.js';
+import runtimeWorker, { QuizRoom, HostSession } from './runtime-worker.js';
 
-export { QuizRoom };
+export { QuizRoom, HostSession };
 
 const MOBILE_CSS = `
 /* Mobile-first enhancements for COCQUIZ */
