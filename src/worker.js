@@ -422,7 +422,7 @@ export default {
       return addSecurityHeaders(await legacyWorker.fetch(request, env, ctx));
     }
 
-    if (url.pathname !== '/') {
+    if (url.pathname !== '/' && url.pathname !== '/login') {
       return new Response('Not found', {
         status: 404,
         headers: {
@@ -434,7 +434,13 @@ export default {
     }
 
     const response = await legacyWorker.fetch(request, env, ctx);
-    const html = patchClientHtml(await response.text());
+    let html = patchClientHtml(await response.text());
+    if (url.pathname === '/login') {
+      html = html.replace(
+        '</body>',
+        '<script>window.addEventListener("DOMContentLoaded",function(){openHostLogin()})</script></body>'
+      );
+    }
     return addHtmlSecurityHeaders(
       new Response(html, {
         status: response.status,
